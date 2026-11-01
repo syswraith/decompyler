@@ -1,10 +1,45 @@
+import os
 import sys
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtCore import Qt
-from decompyler.window import DecompilerWindow
+from decompyler.window import DecompilerWindow, get_binary_path
+
+
+def run_self_check() -> int:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication(sys.argv)
+    window = DecompilerWindow()
+
+    missing = [name for name in ("pycdc", "pycdas") if not get_binary_path(name).exists()]
+    if missing:
+        print(f"Self-check failed: missing bundled binaries: {', '.join(missing)}", file=sys.stderr)
+        return 1
+
+    not_executable = [
+        name for name in ("pycdc", "pycdas")
+        if not os.access(get_binary_path(name), os.X_OK)
+    ]
+    if not_executable:
+        print(f"Self-check failed: bundled binaries are not executable: {', '.join(not_executable)}", file=sys.stderr)
+        return 1
+
+    print("Self-check passed")
+    return 0
+
 
 if __name__ == "__main__":
+    if "--self-check" in sys.argv:
+        if sys.stdout is None:
+            sys.stdout = open(os.devnull, "w")
+        if sys.stderr is None:
+            sys.stderr = open(os.devnull, "w")
+        exit_code = run_self_check()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        # Skip Qt/Python teardown; some headless Qt builds crash during shutdown.
+        os._exit(exit_code)
+
     app = QApplication(sys.argv)
     
     app.setStyle("Fusion")

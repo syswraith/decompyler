@@ -1,24 +1,39 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
-from pathlib import Path
 
 block_cipher = None
 
-# Determine OS-specific binary folder to bundle
 platform_name = sys.platform
 if platform_name.startswith('win'):
     bin_folder = 'src/decompyler/bin/windows'
+    dest_sub = 'decompyler/bin/windows'
+    bin_names = ['pycdc.exe', 'pycdas.exe']
 elif platform_name.startswith('darwin'):
     bin_folder = 'src/decompyler/bin/macos'
+    dest_sub = 'decompyler/bin/macos'
+    bin_names = ['pycdc', 'pycdas']
 else:
     bin_folder = 'src/decompyler/bin/linux'
+    dest_sub = 'decompyler/bin/linux'
+    bin_names = ['pycdc', 'pycdas']
+
+bundled_tools = [(f'{bin_folder}/{name}', dest_sub) for name in bin_names]
 
 a = Analysis(
     ['main.py'],
     pathex=['src'],
-    binaries=[],
-    datas=[(bin_folder, f'decompyler/bin/{platform_name.replace("win", "windows").replace("darwin", "macos").replace("linux", "linux")}')],
-    hiddenimports=['pyinstxtractor_ng', 'pygments', 'pygments.lexers', 'pygments.styles'],
+    binaries=bundled_tools,
+    # Keep the platform-specific pycdc/pycdas executables executable inside the bundle.
+    datas=[],
+    hiddenimports=[
+        'pyinstxtractor_ng',
+        'Crypto.Cipher.AES',
+        'Crypto.Util.Counter',
+        'xdis.unmarshal',
+        'pygments',
+        'pygments.lexers',
+        'pygments.styles',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -42,10 +57,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # Set to True if you want a debug terminal window to stay open
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

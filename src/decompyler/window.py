@@ -1,19 +1,27 @@
-import sys
-import subprocess
+import contextlib
+import io
+import os
 import platform
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import traceback
 from pathlib import Path
-from PySide6.QtCore import Qt, QTimer
+
+from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QFileDialog, 
     QHBoxLayout, QLabel, QComboBox, QSplitter, QStackedWidget, QMessageBox, QDialog
 )
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
 
 from .config import load_settings, save_settings
 from .highlighter import PygmentsSyntaxHighlighter
 from .dialogs import SettingsDialog, FindDialog
 from .widgets import CodeEditor
+
 
 def get_binary_path(tool_name: str) -> Path:
     if getattr(sys, 'frozen', False):
@@ -36,6 +44,120 @@ def get_binary_path(tool_name: str) -> Path:
         ext = ""
     
     return base_path / os_dir / f"{tool_name}{ext}"
+
+
+def find_system_python() -> str | None:
+    candidates = ["py", "python", "python3"] if os.name == "nt" else ["python3", "python"]
+    for name in candidates:
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
+class ExtractionWorker(QThread):
+    finished_ok = Signal(object, object, str)
+    failed = Signal(str)
+
+    def __init__(self, binary: Path, work_dir: Path, parent=None):
+        super().__init__(parent)
+        self.binary = binary
+        self.work_dir = work_dir
+
+    def run(self):
+        from pyinstxtractor_ng import PyInstArchive
+
+        output = io.StringIO()
+        error = io.StringIO()
+        previous_cwd = os.getcwd()
+        try:
+            self.work_dir.mkdir(parents=True, exist_ok=True)
+            os.chdir(self.work_dir)
+            archive = PyInstArchive(str(self.binary.resolve()))
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+                if not archive.open():
+                    raise RuntimeError(error.getvalue().strip() or "Could not open the selected binary.")
+                try:
+                    if not archive.checkFile():
+                        raise RuntimeError(error.getvalue().strip() or "Unsupported or invalid PyInstaller archive.")
+                    if not archive.getCArchiveInfo():
+                        raise RuntimeError(error.getvalue().strip() or "Could not read the archive table of contents.")
+                    archive.parseTOC()
+                    archive.extractFiles(False)
+                finally:
+                    archive.close()
+        except Exception as exc:
+            details = error.getvalue().strip()
+            self.failed.emit(f"{exc}\n\n{details}".strip())
+            return
+        finally:
+            os.chdir(previous_cwd)
+
+        extracted = self.work_dir / f"{self.binary.name}_extracted"
+        if not extracted.exists():
+            extracted = self.work_dir
+        self.finished_ok.emit(extracted, sorted(extracted.rglob("*.pyc")), output.getvalue())
+
+
+class DecompileWorker(QThread):
+    finished_ok = Signal(object, str, str)
+
+    def __init__(self, pyc_path: Path, parent=None):
+        super().__init__(parent)
+        self.pyc_path = pyc_path
+
+    def _run_tool(self, tool_name: str) -> str:
+        binary = get_binary_path(tool_name)
+        label = "Disassembly" if tool_name == "pycdas" else "Decompilation"
+        if not binary.exists():
+            return f"Error: {tool_name} binary not found at {binary}."
+        try:
+            result = subprocess.run(
+                [str(binary), str(self.pyc_path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+                timeout=120,
+            )
+            return result.stdout
+        except subprocess.TimeoutExpired:
+            return f"{label} Error:\nTimed out after 120 seconds."
+        except subprocess.CalledProcessError as exc:
+            return f"{label} Error:\n{exc.stderr or exc.stdout or exc}"
+        except OSError as exc:
+            return f"{label} Error:\n{exc}"
+
+    def run(self):
+        asm = self._run_tool("pycdas")
+        code = self._run_tool("pycdc")
+        self.finished_ok.emit(self.pyc_path, asm, code)
+
+
+class RunBufferWorker(QThread):
+    finished_ok = Signal(str)
+
+    def __init__(self, code: str, script_path: Path, parent=None):
+        super().__init__(parent)
+        self.code = code
+        self.script_path = script_path
+
+    def run(self):
+        output = io.StringIO()
+        previous_cwd = os.getcwd()
+        try:
+            os.chdir(self.script_path.parent)
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                globals_dict = {"__name__": "__main__", "__file__": str(self.script_path)}
+                exec(compile(self.code, str(self.script_path), "exec"), globals_dict)
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                output.write(f"\nExited with status {exc.code}\n")
+        except BaseException:
+            output.write(traceback.format_exc())
+        finally:
+            os.chdir(previous_cwd)
+        self.finished_ok.emit(output.getvalue() or "(no output)")
 
 
 class DecompilerWindow(QMainWindow):
@@ -241,36 +363,64 @@ class DecompilerWindow(QMainWindow):
         target_script = self.extracted_dir / "run_buffer.py"
         try:
             target_script.write_text(code_content, encoding="utf-8")
-            
-            system = platform.system().lower()
-            if system == "windows":
-                cmd_str = f'cmd /k "{sys.executable} "{target_script.resolve()}""'
-                subprocess.Popen(cmd_str, cwd=str(self.extracted_dir), shell=True)
-            elif system == "darwin":
-                cmd_str = f'{sys.executable} "{target_script.resolve()}"; echo ""; echo "Press Enter to close..."; read'
-                subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "cd \\"{self.extracted_dir}\\" && {cmd_str}"'], cwd=str(self.extracted_dir))
-            else:
-                cmd_str = f'{sys.executable} "{target_script.resolve()}"; echo ""; echo "Press Enter to close terminal..."; read'
-                terminals = [
-                    ["gnome-terminal", "--", "bash", "-c", cmd_str],
-                    ["konsole", "-e", "bash", "-c", cmd_str],
-                    ["alacritty", "-e", "bash", "-c", cmd_str],
-                    ["xfce4-terminal", "-e", f'bash -c "{cmd_str}"'],
-                    ["xterm", "-hold", "-e", f"{sys.executable} '{target_script.resolve()}'"]
-                ]
-                launched = False
-                for term_cmd in terminals:
-                    try:
-                        subprocess.Popen(term_cmd, cwd=str(self.extracted_dir))
-                        launched = True
-                        break
-                    except FileNotFoundError:
-                        continue
-                if not launched:
-                    QMessageBox.critical(self, "Terminal Error", "Could not find a supported terminal emulator.")
+        except OSError as exc:
+            QMessageBox.critical(self, "Execution Error", f"Could not write the buffer to disk:\n{exc}")
+            return
 
-        except Exception as e:
-            QMessageBox.critical(self, "Execution Error", f"Failed to launch terminal:\n{str(e)}")
+        interpreter = find_system_python()
+        if interpreter is None:
+            self._run_buffer_in_process(code_content, target_script)
+            return
+
+        try:
+            self._launch_in_terminal(interpreter, target_script)
+        except Exception as exc:
+            QMessageBox.critical(self, "Execution Error", f"Failed to launch terminal:\n{exc}")
+
+    def _run_buffer_in_process(self, code_content: str, target_script: Path):
+        self._run_worker = RunBufferWorker(code_content, target_script, self)
+        self._run_worker.finished_ok.connect(
+            lambda output: QMessageBox.information(self, "Buffer Output", output)
+        )
+        self._run_worker.start()
+
+    def _launch_in_terminal(self, interpreter: str, target_script: Path):
+        system = platform.system().lower()
+        script_path = str(target_script.resolve())
+        work_dir = str(self.extracted_dir)
+
+        if system == "windows":
+            subprocess.Popen(["cmd", "/k", interpreter, script_path], cwd=work_dir)
+            return
+
+        if system == "darwin":
+            command = (
+                f"cd {shlex.quote(work_dir)} && "
+                f"{shlex.quote(interpreter)} {shlex.quote(script_path)}; "
+                'echo ""; echo "Press Enter to close..."; read'
+            )
+            escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{escaped}"'])
+            return
+
+        command = (
+            f"{shlex.quote(interpreter)} {shlex.quote(script_path)}; "
+            'echo ""; echo "Press Enter to close terminal..."; read'
+        )
+        terminals = [
+            ["gnome-terminal", "--", "bash", "-c", command],
+            ["konsole", "-e", "bash", "-c", command],
+            ["alacritty", "-e", "bash", "-c", command],
+            ["xfce4-terminal", "-e", f'bash -c "{command}"'],
+            ["xterm", "-hold", "-e", interpreter, script_path],
+        ]
+        for candidate in terminals:
+            try:
+                subprocess.Popen(candidate, cwd=work_dir)
+                return
+            except FileNotFoundError:
+                continue
+        raise RuntimeError("Could not find a supported terminal emulator.")
 
     def save_script_file(self):
         code_content = self.code_view.toPlainText()
@@ -308,58 +458,47 @@ class DecompilerWindow(QMainWindow):
         if not self.selected_binary:
             return
 
-        try:
-            binary_name = self.selected_binary.stem
-            self.extracted_dir = Path(f"/tmp/decompyler-{binary_name}")
-            self.extracted_dir.mkdir(parents=True, exist_ok=True)
+        self.pyc_selector.setEnabled(False)
+        self.asm_view.setPlainText("Extracting selected binary, please wait...")
+        self.code_view.setPlainText("")
+        self.stack.setCurrentIndex(1)
 
-            result = subprocess.run(
-                [sys.executable, "-m", "pyinstxtractor_ng", str(self.selected_binary.resolve())],
-                cwd=str(self.extracted_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=True
-            )
-            
-            actual_extracted_sub = self.extracted_dir / f"{self.selected_binary.name}_extracted"
-            if actual_extracted_sub.exists():
-                self.extracted_dir = actual_extracted_sub
+        work_dir = Path(tempfile.gettempdir()) / f"decompyler-{self.selected_binary.stem}"
+        self._extract_worker = ExtractionWorker(self.selected_binary, work_dir, self)
+        self._extract_worker.finished_ok.connect(self._on_extraction_finished)
+        self._extract_worker.failed.connect(self._on_extraction_failed)
+        self._extract_worker.start()
 
-            if not self.extracted_dir.exists():
-                raise FileNotFoundError(f"Extraction directory not found at: {self.extracted_dir}")
+    def _on_extraction_finished(self, extracted_dir, pyc_files, output):
+        self.extracted_dir = Path(extracted_dir)
+        self.pyc_files = list(pyc_files)
 
-            self.pyc_files = list(self.extracted_dir.rglob("*.pyc"))
-            
-            if not self.pyc_files:
-                msg = "Extraction complete, but no .pyc files were found.\n\n" + result.stdout
-                self.asm_view.setPlainText(msg)
-                self.code_view.setPlainText(msg)
-                self.stack.setCurrentIndex(1)
-                return
-
-            self.pyc_selector.blockSignals(True)
-            self.pyc_selector.clear()
-            for pyc in self.pyc_files:
-                rel_name = pyc.relative_to(self.extracted_dir)
-                self.pyc_selector.addItem(str(rel_name), pyc)
-            self.pyc_selector.blockSignals(False)
-
-            self.pyc_selector.setEnabled(True)
+        if not self.pyc_files:
+            msg = "Extraction complete, but no .pyc files were found.\n\n" + output
+            self.asm_view.setPlainText(msg)
+            self.code_view.setPlainText(msg)
             self.stack.setCurrentIndex(1)
-            self.pyc_selector.setCurrentIndex(0)
-            self.process_selected_pyc()
+            return
 
-        except subprocess.CalledProcessError as e:
-            err_msg = f"Extraction Error:\n{e.stderr}"
-            self.asm_view.setPlainText(err_msg)
-            self.code_view.setPlainText(err_msg)
-            self.stack.setCurrentIndex(1)
-        except Exception as e:
-            err_msg = f"Error: {str(e)}"
-            self.asm_view.setPlainText(err_msg)
-            self.code_view.setPlainText(err_msg)
-            self.stack.setCurrentIndex(1)
+        self.pyc_selector.blockSignals(True)
+        self.pyc_selector.clear()
+        for pyc in self.pyc_files:
+            rel_name = pyc.relative_to(self.extracted_dir)
+            self.pyc_selector.addItem(str(rel_name), pyc)
+        self.pyc_selector.blockSignals(False)
+
+        self.pyc_selector.setEnabled(True)
+        self.stack.setCurrentIndex(1)
+        self.pyc_selector.setCurrentIndex(0)
+        self.process_selected_pyc()
+
+    def _on_extraction_failed(self, message):
+        self.extracted_dir = None
+        self.pyc_files = []
+        err_msg = f"Extraction Error:\n{message}"
+        self.asm_view.setPlainText(err_msg)
+        self.code_view.setPlainText(err_msg)
+        self.stack.setCurrentIndex(1)
 
     def process_selected_pyc(self):
         if self.pyc_selector.currentIndex() == -1:
@@ -369,22 +508,16 @@ class DecompilerWindow(QMainWindow):
         if not pyc_path or not pyc_path.exists():
             return
 
-        pycdas_bin = get_binary_path("pycdas")
-        if pycdas_bin.exists():
-            try:
-                res = subprocess.run([str(pycdas_bin), str(pyc_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-                self.asm_view.setPlainText(res.stdout)
-            except subprocess.CalledProcessError as e:
-                self.asm_view.setPlainText(f"Disassembly Error:\n{e.stderr}")
-        else:
-            self.asm_view.setPlainText("Error: pycdas binary not found.")
+        self.asm_view.setPlainText("Disassembling, please wait...")
+        self.code_view.setPlainText("Decompiling, please wait...")
 
-        pycdc_bin = get_binary_path("pycdc")
-        if pycdc_bin.exists():
-            try:
-                res = subprocess.run([str(pycdc_bin), str(pyc_path)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-                self.code_view.setPlainText(res.stdout)
-            except subprocess.CalledProcessError as e:
-                self.code_view.setPlainText(f"Decompilation Error:\n{e.stderr}")
-        else:
-            self.code_view.setPlainText("Error: pycdc binary not found.")
+        self._decompile_worker = DecompileWorker(pyc_path, self)
+        self._decompile_worker.finished_ok.connect(self._on_decompile_finished)
+        self._decompile_worker.start()
+
+    def _on_decompile_finished(self, pyc_path, asm, code):
+        current = self.pyc_selector.currentData()
+        if current is None or Path(current) != Path(pyc_path):
+            return
+        self.asm_view.setPlainText(asm)
+        self.code_view.setPlainText(code)

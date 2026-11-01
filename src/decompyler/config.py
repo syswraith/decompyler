@@ -42,4 +42,5 @@ def save_settings(settings: dict):
                 else:
                     f.write(f"{k} = {v}\n")
     except Exception as e:
-        print(f"Error saving config: {e}", file=sys.stderr)
+        if sys.stderr is not None:
+            print(f"Error saving config: {e}", file=sys.stderr)
