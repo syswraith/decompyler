@@ -15,11 +15,10 @@ from .dialogs import SettingsDialog, FindDialog
 from .widgets import CodeEditor
 
 def get_binary_path(tool_name: str) -> Path:
-    """Returns the absolute path to the OS-specific embedded pycdc or pycdas binary."""
     if getattr(sys, 'frozen', False):
-        base_path = Path(sys._MEIPASS)
+        base_path = Path(sys._MEIPASS) / "decompyler" / "bin"
     else:
-        base_path = Path(__file__).parent.parent.parent
+        base_path = Path(__file__).parent / "bin"
     
     system = platform.system().lower()
     if system == "linux":
@@ -35,7 +34,7 @@ def get_binary_path(tool_name: str) -> Path:
         os_dir = "linux"
         ext = ""
     
-    return base_path / "src" / "decompyler" / "bin" / os_dir / f"{tool_name}{ext}"
+    return base_path / os_dir / f"{tool_name}{ext}"
 
 
 class DecompilerWindow(QMainWindow):

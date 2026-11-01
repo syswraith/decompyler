@@ -1,83 +1,107 @@
-name: Build and Release Binaries
+name: Build and Release Executables
 
 on:
   push:
-    branches: [ main ]
     tags:
-      - 'v*'  # Trigger release when a version tag like v1.0.0 is pushed
+      - 'v*'
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build on ${{ matrix.os }}
+    name: Build Executable on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
 
     strategy:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact_name: linux
+            artifact_name: decompyler-linux
+            exe_ext: ""
           - os: windows-latest
-            artifact_name: windows
+            artifact_name: decompyler-windows.exe
+            exe_ext: ".exe"
           - os: macos-latest
-            artifact_name: macos
+            artifact_name: decompyler-macos
+            exe_ext: ""
 
     steps:
-      - name: Checkout Decompyler Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Clone pycdc Source
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies & PyInstaller
+        run: |
+          pip install uv
+          uv pip install --system PySide6 pygments pyinstxtractor-ng pyinstaller
+
+      - name: Clone and Build pycdc Source
         uses: actions/checkout@v4
         with:
           repository: zrax/pycdc
           path: pycdc-source
           submodules: recursive
 
-      - name: Configure CMake (Linux / macOS)
+      - name: Compile pycdc (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
-          mkdir pycdc-source/build
-          cd pycdc-source/build
+          mkdir pycdc-source/build && cd pycdc-source/build
           cmake .. -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build Binaries (Linux / macOS)
-        if: runner.os != 'Windows'
-        run: |
-          cd pycdc-source/build
           make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
-      - name: Configure and Build (Windows)
+      - name: Compile pycdc (Windows)
         if: runner.os == 'Windows'
         run: |
-          cd pycdc-source
-          mkdir build
-          cd build
+          cd pycdc-source && mkdir build && cd build
           cmake .. -A x64
           cmake --build . --config Release
 
-      - name: Organize Built Binaries
+      - name: Place Binaries into Project Structure
         shell: bash
         run: |
-          mkdir -p staging
           if [ "${{ runner.os }}" == "Windows" ]; then
-            mv pycdc-source/build/Release/pycdc.exe staging/pycdc-${{ matrix.artifact_name }}.exe
-            mv pycdc-source/build/Release/pycdas.exe staging/pycdas-${{ matrix.artifact_name }}.exe
+            mkdir -p src/decompyler/bin/windows
+            cp pycdc-source/build/Release/pycdc.exe src/decompyler/bin/windows/
+            cp pycdc-source/build/Release/pycdas.exe src/decompyler/bin/windows/
+          elif [ "${{ runner.os }}" == "macOS" ]; then
+            mkdir -p src/decompyler/bin/macos
+            cp pycdc-source/build/pycdc src/decompyler/bin/macos/
+            cp pycdc-source/build/pycdas src/decompyler/bin/macos/
+            chmod +x src/decompyler/bin/macos/*
           else
-            mv pycdc-source/build/pycdc staging/pycdc-${{ matrix.artifact_name }}
-            mv pycdc-source/build/pycdas staging/pycdas-${{ matrix.artifact_name }}
-            chmod +x staging/*
+            mkdir -p src/decompyler/bin/linux
+            cp pycdc-source/build/pycdc src/decompyler/bin/linux/
+            cp pycdc-source/build/pycdas src/decompyler/bin/linux/
+            chmod +x src/decompyler/bin/linux/*
           fi
 
-      - name: Upload Artifacts for Release
+      - name: Build Standalone Executable with PyInstaller
+        run: pyinstaller decompyler.spec
+
+      - name: Rename Executable Asset
+        shell: bash
+        run: |
+          mkdir -p release_staging
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            mv dist/decompyler.exe release_staging/${{ matrix.artifact_name }}
+          else
+            mv dist/decompyler release_staging/${{ matrix.artifact_name }}
+          fi
+
+      - name: Upload Executable Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binaries-${{ matrix.artifact_name }}
-          path: staging/*
+          name: artifact-${{ matrix.os }}
+          path: release_staging/*
 
   release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') # Only run release job on version tags
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
 
@@ -85,17 +109,14 @@ jobs:
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: all-binaries
+          path: all-artifacts
 
-      - name: Display structure of downloaded files
-        run: ls -R all-binaries
-
-      - name: Create GitHub Release and Upload Assets
+      - name: Create GitHub Release and Upload Executables
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            all-binaries/binaries-linux/*
-            all-binaries/binaries-windows/*
-            all-binaries/binaries-macos/*
+            all-artifacts/artifact-ubuntu-latest/*
+            all-artifacts/artifact-windows-latest/*
+            all-artifacts/artifact-macos-latest/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
