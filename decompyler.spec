@@ -1,7 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
+from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
+
+# Collect all PySide6 binaries, datas, and hidden imports
+pyside6_datas, pyside6_binaries, pyside6_hiddenimports = collect_all('PySide6')
 
 platform_name = sys.platform
 if platform_name.startswith('win'):
@@ -22,9 +26,8 @@ bundled_tools = [(f'{bin_folder}/{name}', dest_sub) for name in bin_names]
 a = Analysis(
     ['main.py'],
     pathex=['src'],
-    binaries=bundled_tools,
-    # Keep the platform-specific pycdc/pycdas executables executable inside the bundle.
-    datas=[],
+    binaries=bundled_tools + pyside6_binaries,
+    datas=[] + pyside6_datas,
     hiddenimports=[
         'pyinstxtractor_ng',
         'Crypto.Cipher.AES',
@@ -33,7 +36,7 @@ a = Analysis(
         'pygments',
         'pygments.lexers',
         'pygments.styles',
-    ],
+    ] + pyside6_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
