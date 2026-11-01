@@ -2,6 +2,7 @@ import sys
 import subprocess
 import platform
 from pathlib import Path
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QFileDialog, 
     QHBoxLayout, QLabel, QComboBox, QSplitter, QStackedWidget, QMessageBox, QDialog
@@ -299,7 +300,8 @@ class DecompilerWindow(QMainWindow):
         if file_path:
             self.selected_binary = Path(file_path)
             self.bin_info_label.setText(f"Target: {self.selected_binary.name}")
-            self.extract_binary()
+            # Defer extraction slightly so the UI renders and doesn't show "Not Responding"
+            QTimer.singleShot(50, self.extract_binary)
 
     def extract_binary(self):
         self.pyc_files.clear()
