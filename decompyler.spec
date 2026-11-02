@@ -1,5 +1,4 @@
 # -*- mode: python ; coding: utf-8 -*-
-import sys
 from PyInstaller.utils.hooks import collect_all
 
 block_cipher = None
@@ -7,26 +6,10 @@ block_cipher = None
 # Collect all PySide6 binaries, datas, and hidden imports
 pyside6_datas, pyside6_binaries, pyside6_hiddenimports = collect_all('PySide6')
 
-platform_name = sys.platform
-if platform_name.startswith('win'):
-    bin_folder = 'src/decompyler/bin/windows'
-    dest_sub = 'decompyler/bin/windows'
-    bin_names = ['pycdc.exe', 'pycdas.exe']
-elif platform_name.startswith('darwin'):
-    bin_folder = 'src/decompyler/bin/macos'
-    dest_sub = 'decompyler/bin/macos'
-    bin_names = ['pycdc', 'pycdas']
-else:
-    bin_folder = 'src/decompyler/bin/linux'
-    dest_sub = 'decompyler/bin/linux'
-    bin_names = ['pycdc', 'pycdas']
-
-bundled_tools = [(f'{bin_folder}/{name}', dest_sub) for name in bin_names]
-
 a = Analysis(
     ['main.py'],
     pathex=['src'],
-    binaries=bundled_tools + pyside6_binaries,
+    binaries=pyside6_binaries,
     datas=[] + pyside6_datas,
     hiddenimports=[
         'pyinstxtractor_ng',

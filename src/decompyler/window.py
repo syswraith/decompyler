@@ -2,6 +2,7 @@ import contextlib
 import io
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -13,37 +14,22 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QPushButton, QFileDialog, 
-    QHBoxLayout, QLabel, QComboBox, QSplitter, QStackedWidget, QMessageBox, QDialog
+    QHBoxLayout, QLabel, QComboBox, QCheckBox, QSplitter, QStackedWidget,
+    QMessageBox, QDialog
 )
 from PySide6.QtGui import QFont, QKeySequence, QShortcut
 
-from .config import load_settings, save_settings
+from .config import CONFIG_FILE, DEFAULT_SETTINGS, load_settings, save_settings
 from .highlighter import PygmentsSyntaxHighlighter
 from .dialogs import SettingsDialog, FindDialog
 from .widgets import CodeEditor
 
 
-def get_binary_path(tool_name: str) -> Path:
-    if getattr(sys, 'frozen', False):
-        base_path = Path(sys._MEIPASS) / "decompyler" / "bin"
-    else:
-        base_path = Path(__file__).parent / "bin"
-    
-    system = platform.system().lower()
-    if system == "linux":
-        os_dir = "linux"
-        ext = ""
-    elif system == "windows":
-        os_dir = "windows"
-        ext = ".exe"
-    elif system == "darwin":
-        os_dir = "macos"
-        ext = ""
-    else:
-        os_dir = "linux"
-        ext = ""
-    
-    return base_path / os_dir / f"{tool_name}{ext}"
+def get_binary_path(tool_name: str, settings: dict | None = None) -> Path:
+    settings = settings or load_settings()
+    key = "pycdc_path" if tool_name == "pycdc" else "pycdas_path"
+    configured = settings.get(key) or DEFAULT_SETTINGS[key]
+    return Path(configured).expanduser()
 
 
 def find_system_python() -> str | None:
@@ -53,6 +39,40 @@ def find_system_python() -> str | None:
         if path:
             return path
     return None
+
+
+EXTRA_STDLIB_MODULES = {"annotationlib", "compression", "_colorize", "_opcode_metadata"}
+BOOTSTRAP_PREFIXES = ("pyimod", "pyiboot", "pyi_rth")
+UUID_SUFFIX = re.compile(
+    r"_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def module_top_level(pyc_path: Path, root: Path) -> str:
+    try:
+        rel = pyc_path.relative_to(root)
+    except ValueError:
+        rel = Path(pyc_path.name)
+    parts = rel.parts
+    if parts:
+        first_part = parts[0].lower()
+        if ".pyz" in first_part and first_part.endswith("_extracted"):
+            parts = parts[1:]
+    if not parts:
+        return ""
+    module_name = Path(parts[0]).stem if len(parts) == 1 else parts[0]
+    return UUID_SUFFIX.sub("", module_name)
+
+
+def should_hide_module(module_name: str) -> bool:
+    if not module_name:
+        return False
+    return (
+        module_name in sys.stdlib_module_names
+        or module_name in EXTRA_STDLIB_MODULES
+        or module_name.startswith(BOOTSTRAP_PREFIXES)
+    )
 
 
 class ExtractionWorker(QThread):
@@ -71,6 +91,7 @@ class ExtractionWorker(QThread):
         error = io.StringIO()
         previous_cwd = os.getcwd()
         try:
+            shutil.rmtree(self.work_dir, ignore_errors=True)
             self.work_dir.mkdir(parents=True, exist_ok=True)
             os.chdir(self.work_dir)
             archive = PyInstArchive(str(self.binary.resolve()))
@@ -102,15 +123,19 @@ class ExtractionWorker(QThread):
 class DecompileWorker(QThread):
     finished_ok = Signal(object, str, str)
 
-    def __init__(self, pyc_path: Path, parent=None):
+    def __init__(self, pyc_path: Path, settings: dict, parent=None):
         super().__init__(parent)
         self.pyc_path = pyc_path
+        self.settings = settings
 
     def _run_tool(self, tool_name: str) -> str:
-        binary = get_binary_path(tool_name)
+        binary = get_binary_path(tool_name, self.settings)
         label = "Disassembly" if tool_name == "pycdas" else "Decompilation"
         if not binary.exists():
-            return f"Error: {tool_name} binary not found at {binary}."
+            return (
+                f"Error: {tool_name} binary not found at {binary}.\n"
+                f"Set its path in Settings or in {CONFIG_FILE}."
+            )
         try:
             result = subprocess.run(
                 [str(binary), str(self.pyc_path)],
@@ -260,6 +285,11 @@ class DecompilerWindow(QMainWindow):
         self.pyc_selector.currentIndexChanged.connect(self.process_selected_pyc)
         top_bar.addWidget(self.pyc_selector)
 
+        self.hide_stdlib_checkbox = QCheckBox("Hide stdlib")
+        self.hide_stdlib_checkbox.setChecked(self.settings["hide_stdlib"])
+        self.hide_stdlib_checkbox.toggled.connect(self.toggle_hide_stdlib)
+        top_bar.addWidget(self.hide_stdlib_checkbox)
+
         main_layout.addLayout(top_bar)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -339,10 +369,15 @@ class DecompilerWindow(QMainWindow):
         if dialog.exec() == QDialog.Accepted:
             self.settings = dialog.get_settings()
             save_settings(self.settings)
-            
+
+            self.hide_stdlib_checkbox.blockSignals(True)
+            self.hide_stdlib_checkbox.setChecked(self.settings["hide_stdlib"])
+            self.hide_stdlib_checkbox.blockSignals(False)
+
             self.apply_global_fonts()
             self.code_highlighter.set_lexer_and_style("python", self.settings["theme"])
             self.asm_highlighter.set_lexer_and_style("asm", self.settings["theme"])
+            self.populate_pyc_selector()
 
     def open_find_dialog(self):
         """Opens the find dialog targeting whichever code view currently has focus."""
@@ -471,7 +506,7 @@ class DecompilerWindow(QMainWindow):
 
     def _on_extraction_finished(self, extracted_dir, pyc_files, output):
         self.extracted_dir = Path(extracted_dir)
-        self.pyc_files = list(pyc_files)
+        self.pyc_files = sorted(list(pyc_files), key=lambda p: len(str(p)))
 
         if not self.pyc_files:
             msg = "Extraction complete, but no .pyc files were found.\n\n" + output
@@ -480,17 +515,54 @@ class DecompilerWindow(QMainWindow):
             self.stack.setCurrentIndex(1)
             return
 
+        self.stack.setCurrentIndex(1)
+        self.populate_pyc_selector()
+
+    def populate_pyc_selector(self):
+        if not self.pyc_files or self.extracted_dir is None:
+            return
+
+        current = self.pyc_selector.currentData()
+        visible_files = []
+        for pyc in self.pyc_files:
+            module_name = module_top_level(pyc, self.extracted_dir)
+            if self.settings.get("hide_stdlib", True) and should_hide_module(module_name):
+                continue
+            visible_files.append(pyc)
+
         self.pyc_selector.blockSignals(True)
         self.pyc_selector.clear()
-        for pyc in self.pyc_files:
+        for pyc in visible_files:
             rel_name = pyc.relative_to(self.extracted_dir)
             self.pyc_selector.addItem(str(rel_name), pyc)
+
+        if not visible_files:
+            self.pyc_selector.blockSignals(False)
+            self.pyc_selector.setEnabled(False)
+            message = (
+                "All extracted modules are hidden by the standard-library filter.\n"
+                'Uncheck "Hide stdlib" to show them.'
+            )
+            self.asm_view.setPlainText(message)
+            self.code_view.setPlainText(message)
+            return
+
+        index = 0
+        if current is not None:
+            for i in range(self.pyc_selector.count()):
+                if Path(self.pyc_selector.itemData(i)) == Path(current):
+                    index = i
+                    break
+        self.pyc_selector.setCurrentIndex(index)
         self.pyc_selector.blockSignals(False)
 
         self.pyc_selector.setEnabled(True)
-        self.stack.setCurrentIndex(1)
-        self.pyc_selector.setCurrentIndex(0)
         self.process_selected_pyc()
+
+    def toggle_hide_stdlib(self, checked: bool):
+        self.settings["hide_stdlib"] = checked
+        save_settings(self.settings)
+        self.populate_pyc_selector()
 
     def _on_extraction_failed(self, message):
         self.extracted_dir = None
@@ -508,10 +580,26 @@ class DecompilerWindow(QMainWindow):
         if not pyc_path or not pyc_path.exists():
             return
 
+        missing = [
+            name for name in ("pycdc", "pycdas")
+            if not get_binary_path(name, self.settings).exists()
+        ]
+        if missing:
+            message = (
+                "The following decompiler binaries could not be found: "
+                f"{', '.join(missing)}.\n\n"
+                "Set their paths in Settings or in "
+                f"{CONFIG_FILE}."
+            )
+            self.asm_view.setPlainText(message)
+            self.code_view.setPlainText(message)
+            QMessageBox.warning(self, "Missing Binaries", message)
+            return
+
         self.asm_view.setPlainText("Disassembling, please wait...")
         self.code_view.setPlainText("Decompiling, please wait...")
 
-        self._decompile_worker = DecompileWorker(pyc_path, self)
+        self._decompile_worker = DecompileWorker(pyc_path, self.settings, self)
         self._decompile_worker.finished_ok.connect(self._on_decompile_finished)
         self._decompile_worker.start()
 

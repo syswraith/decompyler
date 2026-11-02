@@ -3,6 +3,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtCore import Qt
+from decompyler.config import load_settings
 from decompyler.window import DecompilerWindow, get_binary_path
 
 
@@ -11,18 +12,17 @@ def run_self_check() -> int:
     app = QApplication(sys.argv)
     window = DecompilerWindow()
 
-    missing = [name for name in ("pycdc", "pycdas") if not get_binary_path(name).exists()]
-    if missing:
-        print(f"Self-check failed: missing bundled binaries: {', '.join(missing)}", file=sys.stderr)
-        return 1
-
-    not_executable = [
-        name for name in ("pycdc", "pycdas")
-        if not os.access(get_binary_path(name), os.X_OK)
-    ]
-    if not_executable:
-        print(f"Self-check failed: bundled binaries are not executable: {', '.join(not_executable)}", file=sys.stderr)
-        return 1
+    settings = load_settings()
+    for name in ("pycdc", "pycdas"):
+        path = get_binary_path(name, settings)
+        if not path.exists():
+            print(
+                f"Warning: {name} binary not found at {path}. "
+                "Configure it in Settings.",
+                file=sys.stderr,
+            )
+        elif not os.access(path, os.X_OK):
+            print(f"Warning: {name} binary is not executable: {path}", file=sys.stderr)
 
     print("Self-check passed")
     return 0

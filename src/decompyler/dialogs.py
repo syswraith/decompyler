@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import (
     QDialog, QFormLayout, QComboBox, QFontComboBox, QSpinBox, QDialogButtonBox,
-    QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QCheckBox
+    QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QCheckBox,
+    QFileDialog, QWidget
 )
 from PySide6.QtGui import QFont, QTextCursor
 from PySide6.QtGui import QTextDocument
@@ -10,7 +11,7 @@ class SettingsDialog(QDialog):
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Preferences")
-        self.resize(440, 260)
+        self.resize(520, 360)
 
         layout = QFormLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -33,16 +34,49 @@ class SettingsDialog(QDialog):
         self.size_spin.setValue(current_settings["font_size"])
         layout.addRow("Font Size:", self.size_spin)
 
+        self.hide_stdlib_checkbox = QCheckBox("Hide standard library modules")
+        self.hide_stdlib_checkbox.setChecked(current_settings.get("hide_stdlib", True))
+        layout.addRow("Module Filter:", self.hide_stdlib_checkbox)
+
+        self.pycdc_edit = QLineEdit(current_settings.get("pycdc_path", ""))
+        layout.addRow("pycdc Binary:", self._make_path_row(self.pycdc_edit))
+
+        self.pycdas_edit = QLineEdit(current_settings.get("pycdas_path", ""))
+        layout.addRow("pycdas Binary:", self._make_path_row(self.pycdas_edit))
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addRow(buttons)
 
+    def _make_path_row(self, line_edit: QLineEdit) -> QWidget:
+        container = QWidget()
+        row = QHBoxLayout(container)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(lambda: self._browse_for_binary(line_edit))
+
+        row.addWidget(line_edit)
+        row.addWidget(browse_btn)
+        return container
+
+    def _browse_for_binary(self, line_edit: QLineEdit):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Binary", line_edit.text(), "All Files (*)"
+        )
+        if file_path:
+            line_edit.setText(file_path)
+
     def get_settings(self) -> dict:
         return {
             "theme": self.theme_combo.currentText(),
             "font_family": self.font_combo.currentFont().family(),
-            "font_size": self.size_spin.value()
+            "font_size": self.size_spin.value(),
+            "hide_stdlib": self.hide_stdlib_checkbox.isChecked(),
+            "pycdc_path": self.pycdc_edit.text().strip(),
+            "pycdas_path": self.pycdas_edit.text().strip(),
         }
 
 
