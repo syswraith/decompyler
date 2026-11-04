@@ -1,15 +1,23 @@
 import os
 import sys
 from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QPalette, QColor
+from PySide6.QtGui import QIcon, QPalette, QColor
 from PySide6.QtCore import Qt
 from decompyler.config import load_settings
+from decompyler.resources import resource_path
 from decompyler.window import DecompilerWindow, get_binary_path
+
+
+def apply_app_icon(app):
+    icon_path = resource_path("assets/logo-rounded.png")
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
 
 def run_self_check() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QApplication(sys.argv)
+    apply_app_icon(app)
     window = DecompilerWindow()
 
     settings = load_settings()
@@ -41,7 +49,8 @@ if __name__ == "__main__":
         os._exit(exit_code)
 
     app = QApplication(sys.argv)
-    
+    apply_app_icon(app)
+
     app.setStyle("Fusion")
     dark_palette = QPalette()
     dark_palette.setColor(QPalette.Window, QColor(30, 30, 30))

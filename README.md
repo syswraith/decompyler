@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo-rounded.png" alt="Decompyler logo" width="180">
+</p>
+
 # Decompyler
 
 A desktop tool for extracting PyInstaller-packed executables and decompiling or
