@@ -17,11 +17,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QComboBox, QCheckBox, QSplitter, QStackedWidget,
     QMessageBox, QDialog
 )
-from PySide6.QtGui import QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QFont, QKeySequence, QPixmap, QShortcut
 
 from .config import CONFIG_FILE, DEFAULT_SETTINGS, load_settings, save_settings
 from .highlighter import PygmentsSyntaxHighlighter
 from .dialogs import SettingsDialog, FindDialog
+from .resources import resource_path
 from .widgets import CodeEditor
 
 
@@ -212,6 +213,17 @@ class DecompilerWindow(QMainWindow):
         layout = QVBoxLayout(self.welcome_widget)
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(15)
+
+        logo_path = resource_path("assets/logo-rounded.png")
+        if logo_path.exists():
+            logo_label = QLabel()
+            logo_label.setPixmap(
+                QPixmap(str(logo_path)).scaled(
+                    180, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation
+                )
+            )
+            logo_label.setAlignment(Qt.AlignCenter)
+            layout.addWidget(logo_label, alignment=Qt.AlignCenter)
 
         title_label = QLabel("Decompyler")
         title_font = QFont()
