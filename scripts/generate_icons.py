@@ -9,6 +9,11 @@ SOURCE = ROOT / "logo.png"
 ASSETS = ROOT / "assets"
 ROUNDED = ASSETS / "logo-rounded.png"
 
+ICON_SIZE = 1024
+CORNER_RADIUS = 184
+BORDER_COLOR = "#3daee9"
+BORDER_WIDTH = 8
+
 ICNS_TYPES = {
     b"ic07": 128,
     b"ic08": 256,
@@ -30,8 +35,11 @@ def magick(*args, capture=False):
     return result.stdout
 
 
-def generate_rounded_png(size=1024, radius=184):
-    mask = f"roundrectangle 0,0 {size - 1},{size - 1} {radius},{radius}"
+def generate_rounded_png():
+    mask = (
+        f"roundrectangle 0,0 {ICON_SIZE - 1},{ICON_SIZE - 1} "
+        f"{CORNER_RADIUS},{CORNER_RADIUS}"
+    )
     magick(
         SOURCE,
         "-background",
@@ -41,12 +49,12 @@ def generate_rounded_png(size=1024, radius=184):
         "-filter",
         "Lanczos",
         "-resize",
-        f"{size}x{size}",
+        f"{ICON_SIZE}x{ICON_SIZE}",
         "-extent",
-        f"{size}x{size}",
+        f"{ICON_SIZE}x{ICON_SIZE}",
         "(",
         "-size",
-        f"{size}x{size}",
+        f"{ICON_SIZE}x{ICON_SIZE}",
         "xc:none",
         "-fill",
         "white",
@@ -58,6 +66,25 @@ def generate_rounded_png(size=1024, radius=184):
         "-compose",
         "DstIn",
         "-composite",
+        ROUNDED,
+    )
+
+    inset = BORDER_WIDTH // 2
+    border = (
+        f"roundrectangle {inset},{inset} "
+        f"{ICON_SIZE - 1 - inset},{ICON_SIZE - 1 - inset} "
+        f"{CORNER_RADIUS - inset},{CORNER_RADIUS - inset}"
+    )
+    magick(
+        ROUNDED,
+        "-stroke",
+        BORDER_COLOR,
+        "-strokewidth",
+        BORDER_WIDTH,
+        "-fill",
+        "none",
+        "-draw",
+        border,
         ROUNDED,
     )
 
