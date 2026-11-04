@@ -42,6 +42,37 @@ def find_system_python() -> str | None:
     return None
 
 
+def clean_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    bundle_dir = os.environ.get("_PYI_APPLICATION_HOME_DIR") or getattr(sys, "_MEIPASS", None)
+    if not bundle_dir:
+        return env
+
+    bundle_path = Path(bundle_dir).resolve()
+    for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        value = env.get(key)
+        if not value:
+            continue
+
+        entries = []
+        for entry in value.split(os.pathsep):
+            if not entry:
+                continue
+            try:
+                entry_path = Path(entry).resolve()
+            except OSError:
+                entry_path = Path(entry)
+            if entry_path == bundle_path or bundle_path in entry_path.parents:
+                continue
+            entries.append(entry)
+
+        if entries:
+            env[key] = os.pathsep.join(entries)
+        else:
+            env.pop(key, None)
+    return env
+
+
 EXTRA_STDLIB_MODULES = {"annotationlib", "compression", "_colorize", "_opcode_metadata"}
 BOOTSTRAP_PREFIXES = ("pyimod", "pyiboot", "pyi_rth")
 UUID_SUFFIX = re.compile(
@@ -145,6 +176,7 @@ class DecompileWorker(QThread):
                 text=True,
                 check=True,
                 timeout=120,
+                env=clean_subprocess_env(),
             )
             return result.stdout
         except subprocess.TimeoutExpired:
@@ -435,9 +467,10 @@ class DecompilerWindow(QMainWindow):
         system = platform.system().lower()
         script_path = str(target_script.resolve())
         work_dir = str(self.extracted_dir)
+        env = clean_subprocess_env()
 
         if system == "windows":
-            subprocess.Popen(["cmd", "/k", interpreter, script_path], cwd=work_dir)
+            subprocess.Popen(["cmd", "/k", interpreter, script_path], cwd=work_dir, env=env)
             return
 
         if system == "darwin":
@@ -447,7 +480,10 @@ class DecompilerWindow(QMainWindow):
                 'echo ""; echo "Press Enter to close..."; read'
             )
             escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-            subprocess.Popen(["osascript", "-e", f'tell application "Terminal" to do script "{escaped}"'])
+            subprocess.Popen(
+                ["osascript", "-e", f'tell application "Terminal" to do script "{escaped}"'],
+                env=env,
+            )
             return
 
         command = (
@@ -463,7 +499,7 @@ class DecompilerWindow(QMainWindow):
         ]
         for candidate in terminals:
             try:
-                subprocess.Popen(candidate, cwd=work_dir)
+                subprocess.Popen(candidate, cwd=work_dir, env=env)
                 return
             except FileNotFoundError:
                 continue
